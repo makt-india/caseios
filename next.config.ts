@@ -13,7 +13,10 @@ function validateEnvironment() {
   const missing = required.filter(key => !process.env[key]);
   
   if (missing.length > 0) {
-    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+    console.warn(`[WARNING] Missing required environment variables: ${missing.join(", ")}`);
+    console.warn(`Ensure these are set in your Cloudflare Pages dashboard before accessing the app.`);
+    // We intentionally don't throw an Error here so Cloudflare can successfully complete the build step.
+    // Individual API routes check for these dynamically at runtime.
   }
 }
 
