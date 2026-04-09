@@ -1,0 +1,181 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Order {
+  id                 String      @id @default(cuid())
+  userId             String?     // Optional: for authenticated users
+  user               User?       @relation(fields: [userId], references: [id])
+  customerName       String
+  customerEmail      String
+  address            String
+  amount             Float       // Total amount in rupees (backend-calculated)
+  paymentMethod      String      // "card" or "upi"
+
+  // Razorpay payment fields
+  razorpayOrderId    String      @unique
+  razorpayPaymentId  String?     // Payment ID after successful payment
+  razorpaySignature  String?     // Signature for audit trail
+
+  // Order status flow: pending → paid → shipped → completed
+  status             String      @default("pending") // pending, paid, shipped, completed
+  paymentStatus      String      @default("pending") // pending, completed, failed
+  failureReason      String?     // Store why payment failed
+
+  // Idempotency protection
+  requestId          String?     @unique // Unique request identifier for idempotency
+
+  // Order items
+  items              OrderItem[]
+
+  // Payment logs for audit trail
+  paymentLogs        PaymentLog[]
+
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([userId])
+  @@index([customerEmail])
+  @@index([createdAt])
+  @@index([paymentStatus])
+  @@index([razorpayOrderId])
+}
+
+model OrderItem {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id])
+
+  quantity      Int
+  priceAtPurchase Float // Store price at time of purchase
+
+  createdAt     DateTime @default(now())
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model PaymentLog {
+  id              String   @id @default(cuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Request details
+  requestId       String?  // Idempotency key
+  ipAddress       String?  // IPv4 or IPv6
+
+  // Payment verification details
+  razorpayPaymentId String?
+  razorpayOrderId   String?
+  signature         String?
+
+  // Status tracking
+  status          String   // pending, verified, failed, duplicate
+  errorMessage    String?  // Log why verification failed
+
+  // Fraud indicators
+  isRetry         Boolean  @default(false)
+  attemptCount    Int      @default(1)
+
+  createdAt       DateTime @default(now())
+
+  @@index([orderId])
+  @@index([requestId])
+  @@index([createdAt])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  description String
+  price       Float
+  category    String
+  image       String   @default("/images/hero.png")
+  orderItems  OrderItem[]
+  createdAt   DateTime @default(now())
+
+  @@index([category])
+  @@index([createdAt])
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([createdAt])
+}
+
+model User {
+  id               String    @id @default(cuid())
+  name             String
+  email            String    @unique
+  password         String
+  role             String    @default("user") // "user" or "admin"
+  resetToken       String?   @unique // Hashed version of the reset token
+  resetTokenExpiry DateTime? // Expiration time for reset token
+  createdAt        DateTime  @default(now())
+
+  orders    Order[]
+  sessions  Session[]
+  adminLogs AdminLog[]
+
+  @@index([email])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique // 32 bytes = 64 hex chars
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress String?  // IPv4 or IPv6
+  userAgent String?  // Browser/Device info
+  expiresAt DateTime // Session expiration timestamp
+  createdAt DateTime @default(now())
+
+  @@index([token])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  adminEmail String
+  action    String   // "create_order", "delete_order", "update_order", "add_product", "delete_product", etc.
+  resourceId String? // Order ID, Product ID, etc.
+  resourceType String? // "order", "product", etc.
+  details   String?  // JSON details of the change
+  ipAddress String?
+  timestamp DateTime @default(now())
+
+  @@index([adminEmail])
+  @@index([action])
+  @@index([timestamp])
+}
+
+model AdminLog {
+  id        String   @id @default(cuid())
+  adminId   String
+  admin     User     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  action    String   // "login", "logout", "add_product", "delete_order", etc.
+  ip        String?
+  userAgent String?
+  details   String?  // Optional JSON details
+  createdAt DateTime @default(now())
+
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+}
