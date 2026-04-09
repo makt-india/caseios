@@ -10,20 +10,25 @@ const globalForPrisma = globalThis as unknown as {
  * - In production: plain client with no logging overhead
  * - Uses global singleton to survive Next.js hot-reloads
  */
-export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    datasources: {
-      db: {
-        url: process.env.DATABASE_URL || "file:./dev.db",
-      },
-    },
-    log:
-      process.env.NODE_ENV === "development"
-        ? ["query", "warn", "error"]
-        : ["error"],
-  });
+let prismaSingleton: PrismaClient;
 
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma;
-}
+export const prisma = new Proxy({} as PrismaClient, {
+  get(target, prop) {
+    if (!prismaSingleton) {
+      prismaSingleton = globalForPrisma.prisma ?? new PrismaClient({
+        datasources: {
+          db: {
+            url: process.env.DATABASE_URL || "file:./dev.db",
+          },
+        },
+        log: process.env.NODE_ENV === "development" ? ["query", "warn", "error"] : ["error"],
+      });
+      if (process.env.NODE_ENV !== "production") {
+        globalForPrisma.prisma = prismaSingleton;
+      }
+    }
+    return (prismaSingleton as any)[prop];
+  }
+});
+
+
