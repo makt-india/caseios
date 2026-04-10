@@ -18,6 +18,7 @@ export const prisma = new Proxy({} as PrismaClient, {
       prismaSingleton = globalForPrisma.prisma ?? new PrismaClient({
         datasources: {
           db: {
+            // Priority: Vercel/Neon Pooled URL -> General DATABASE_URL -> Dummy fallback for build/tests
             url: process.env.POSTGRES_PRISMA_URL || process.env.DATABASE_URL || "postgresql://dummy:dummy@localhost:5432/dummy",
           },
         },
