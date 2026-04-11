@@ -1,7 +1,7 @@
 "use server";
 
 import { prisma } from "@/lib/db";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag, unstable_cache } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { rateLimit, clearRateLimit } from "@/lib/rateLimit";
@@ -10,13 +10,13 @@ import { validateCSRFToken } from "@/lib/csrf";
 import { isValidImageUrl } from "@/lib/validation";
 import { hashPassword, verifyPassword, generateSessionToken } from "@/lib/security";
 import { getCurrentUser, logoutUser as libLogoutUser, requireAdmin } from "@/lib/auth";
+
 // ========================
 // INTERNAL HELPERS
 // ========================
 
 /**
  * Extracts the client IP from request headers.
- * Deduplicates the same 6-line block that used to exist across every action.
  */
 export async function getClientIp(): Promise<string> {
   const headersList = await headers();
@@ -78,7 +78,7 @@ async function seedAdminIfMissing() {
   if (!existing) {
     await prisma.user.create({
       data: {
-        name: "CASIOS Admin",
+        name: "CASEIOS Admin",
         email: adminEmail,
         password: adminPassHash,
         role: "admin",
@@ -131,7 +131,7 @@ export async function loginUser(prevState: any, formData: FormData) {
   });
 
   (await cookies()).set({
-    name: "casios_session_token",
+    name: "caseios_session_token",
     value: sessionToken,
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -201,7 +201,7 @@ export async function registerUser(prevState: any, formData: FormData) {
   });
 
   (await cookies()).set({
-    name: "casios_session_token",
+    name: "caseios_session_token",
     value: sessionToken,
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
@@ -236,10 +236,39 @@ export async function verifyAdminSessionValid(token?: string): Promise<boolean> 
 // PRODUCT MANAGEMENT
 // ========================
 
-export async function getProducts() {
-  return await prisma.product.findMany({
-    orderBy: { createdAt: "desc" },
-  });
+/**
+ * Fetches the product list for public display.
+ * Cached via unstable_cache with the "products" tag.
+ * Revalidated automatically when admin adds or deletes a product via revalidateTag.
+ *
+ * PERFORMANCE: selects only the columns needed for the grid/shop —
+ * excludes `description` (up to 5000 chars per product).
+ */
+export const getProducts = unstable_cache(
+  async () => {
+    return prisma.product.findMany({
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        category: true,
+        price: true,
+        image: true,
+        createdAt: true,
+      },
+    });
+  },
+  ["products"],
+  { tags: ["products"], revalidate: 60 } // also revalidate every 60 seconds as a fallback
+);
+
+/**
+ * Fetch a single product with full details (including description).
+ * Used on the product detail page.
+ */
+export async function getProductById(id: string) {
+  if (!id?.trim()) throw new Error("Product ID required");
+  return await prisma.product.findUnique({ where: { id } });
 }
 
 export async function addProduct(formData: FormData) {
@@ -291,7 +320,8 @@ export async function addProduct(formData: FormData) {
     details: { productName: name, category, price },
   });
 
-  revalidatePath("/");
+  // Invalidate the products cache so the new product appears immediately
+  revalidateTag("products", "max");
   revalidatePath("/admin");
 }
 
@@ -301,13 +331,17 @@ export async function deleteProduct(id: string) {
     throw new Error("Product ID required");
   }
 
-  // Guard: throw clearly if product doesn't exist instead of letting Prisma throw a cryptic error
   const product = await prisma.product.findUnique({ where: { id } });
   if (!product) {
     throw new Error(`Product ${id} not found`);
   }
 
-  await prisma.product.delete({ where: { id } });
+  // Delete order items referencing this product first, then the product itself —
+  // all in one atomic transaction to avoid the FK constraint violation.
+  await prisma.$transaction([
+    prisma.orderItem.deleteMany({ where: { productId: id } }),
+    prisma.product.delete({ where: { id } }),
+  ]);
 
   await logToAdminLog("delete_product", { productId: id, name: product.name });
 
@@ -320,7 +354,8 @@ export async function deleteProduct(id: string) {
     details: { productName: product.name, productPrice: product.price },
   });
 
-  revalidatePath("/");
+  // Invalidate the products cache so the deleted product disappears immediately
+  revalidateTag("products", "max");
   revalidatePath("/admin");
 }
 
@@ -330,14 +365,15 @@ export async function deleteProduct(id: string) {
 
 /**
  * Returns orders with optional filtering.
- * Supports filtering by paymentStatus and/or status for admin panel views.
- * Fetches paginated results to avoid loading the full table on every request.
+ * PERFORMANCE: Uses `select` for only the columns shown in the admin table.
+ * The deep `include: { items: { include: { product: true } } }` has been removed
+ * from the list view — order items are only fetched when viewing a single order.
  */
 export async function getOrders(
   filter?: {
     paymentStatus?: "pending" | "completed" | "failed";
     status?: "pending" | "paid" | "shipped" | "completed";
-    search?: string; // matches customerName or customerEmail
+    search?: string;
   },
   limit = 200
 ) {
@@ -348,12 +384,26 @@ export async function getOrders(
       ...(filter?.status && { status: filter.status }),
       ...(filter?.search && {
         OR: [
-          { customerName: { contains: filter.search } },
-          { customerEmail: { contains: filter.search } },
+          { customerName: { contains: filter.search, mode: "insensitive" } },
+          { customerEmail: { contains: filter.search, mode: "insensitive" } },
         ],
       }),
     },
-    include: { items: { include: { product: true } } },
+    select: {
+      id: true,
+      customerName: true,
+      customerEmail: true,
+      address: true,
+      amount: true,
+      paymentMethod: true,
+      status: true,
+      paymentStatus: true,
+      razorpayOrderId: true,
+      razorpayPaymentId: true,
+      createdAt: true,
+      // Count of items without fetching product details
+      _count: { select: { items: true } },
+    },
     orderBy: { createdAt: "desc" },
     take: limit,
   });
@@ -361,7 +411,6 @@ export async function getOrders(
 
 /**
  * Returns total revenue from COMPLETED payments only.
- * Excludes pending and failed orders from the revenue figure.
  */
 export async function getCompletedRevenue(): Promise<number> {
   await requireAdmin();
@@ -466,6 +515,8 @@ export async function updateOrderStatus(
 // CONTACT LEADS
 // ========================
 
+import { sendContactUserAutoReply, sendContactAdminNotification } from "@/lib/email";
+
 export async function submitContactMessage(formData: FormData) {
   const firstName = formData.get("firstName") as string;
   const lastName = formData.get("lastName") as string;
@@ -490,6 +541,12 @@ export async function submitContactMessage(formData: FormData) {
     },
   });
 
+  // Non-blocking email dispatch
+  Promise.allSettled([
+    sendContactUserAutoReply(email.trim().toLowerCase(), firstName.trim()),
+    sendContactAdminNotification(firstName.trim(), lastName.trim(), email.trim().toLowerCase(), message.trim()),
+  ]).catch(err => console.error("[EMAIL ERROR] Failed to send contact emails:", err));
+
   revalidatePath("/admin");
 }
 
@@ -510,13 +567,8 @@ export async function deleteContactMessage(id: string) {
 }
 
 // ========================
-// UTILITIES
+// USER UTILITIES
 // ========================
-
-export async function getProductById(id: string) {
-  if (!id?.trim()) throw new Error("Product ID required");
-  return await prisma.product.findUnique({ where: { id } });
-}
 
 export async function getMyOrders() {
   const user = await getCurrentUser();
@@ -524,7 +576,23 @@ export async function getMyOrders() {
 
   return await prisma.order.findMany({
     where: { userId: user.id },
-    include: { items: { include: { product: true } } },
+    select: {
+      id: true,
+      amount: true,
+      status: true,
+      paymentStatus: true,
+      paymentMethod: true,
+      createdAt: true,
+      items: {
+        select: {
+          quantity: true,
+          priceAtPurchase: true,
+          product: {
+            select: { id: true, name: true, category: true, image: true },
+          },
+        },
+      },
+    },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -557,4 +625,3 @@ export async function getAdminSessions(limit = 50) {
     take: limit,
   });
 }
-

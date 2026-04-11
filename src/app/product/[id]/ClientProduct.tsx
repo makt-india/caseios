@@ -8,9 +8,11 @@ import Link from "next/link";
 import { ArrowLeft, Check } from "lucide-react";
 import { useCart } from "@/components/cart/CartContext";
 import { Product } from "@/lib/types";
+import { useRouter } from "next/navigation";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export default function ClientProduct({ product }: { product: Product }) {
+  const router = useRouter();
   const [added, setAdded] = useState(false);
   const { addToCart } = useCart();
 
@@ -40,10 +42,10 @@ export default function ClientProduct({ product }: { product: Product }) {
   return (
     <div className="w-full flex-col flex min-h-screen pt-24 px-6 md:px-12 lg:px-24">
       <FadeIn className="mb-8">
-        <Link href="/" className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors">
+        <button onClick={() => router.back()} className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors">
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Discover
-        </Link>
+        </button>
       </FadeIn>
 
       <div className="flex flex-col lg:flex-row gap-16 lg:gap-24 mb-32 relative">
@@ -151,7 +153,7 @@ export default function ClientProduct({ product }: { product: Product }) {
               <div className="space-y-2 pt-6 border-t border-white/10">
                 <h4 className="text-sm font-semibold tracking-widest uppercase text-white mb-2">Warranty & Support</h4>
                 <p className="text-sm text-muted-foreground/80 leading-relaxed font-light">
-                  Includes 2-year CASIOS India Protection+. Complete replacement guarantees against all manufacturer anomalies with 24/7 priority encrypted support.
+                  Includes 2-year CASEIOS India Protection+. Complete replacement guarantees against all manufacturer anomalies with 24/7 priority encrypted support.
                 </p>
               </div>
             </FadeInStaggerItem>

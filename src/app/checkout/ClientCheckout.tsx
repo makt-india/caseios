@@ -6,11 +6,14 @@ import Link from "next/link";
 import { ArrowLeft, ShieldCheck, CreditCard, Apple, CheckCircle2 } from "lucide-react";
 import Image from "next/image";
 import { useCart } from "@/components/cart/CartContext";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Loader2, MapPin } from "lucide-react";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { INDIAN_STATES, getDistrictsForState } from "@/lib/data/india-regions";
 import { type IndianAddress } from "@/lib/services/orderService";
+
+const SUPPORT_EMAIL = process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "makt.in.help@gmail.com";
+const SUPPORT_PHONE = process.env.NEXT_PUBLIC_SUPPORT_PHONE ?? "+91 8883335553";
 
 declare global {
   interface Window {
@@ -21,6 +24,7 @@ declare global {
 export default function ClientCheckout({ user }: { user: { id: string, name: string, email: string } }) {
   const { cartItems, cartTotal, clearCart } = useCart();
   const [method, setMethod] = useState<"card" | "upi">("card");
+  const [razorpayReady, setRazorpayReady] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [loadingState, setLoadingState] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +33,23 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
   // Pre-fill from authenticated user
   const [customerName, setCustomerName] = useState(user.name);
   const [email, setEmail] = useState(user.email);
+
+  // FIX H1: requestId must be STABLE for the entire checkout session.
+  // Previously regenerated with Date.now() on every "Pay" click — completely
+  // bypassed idempotency protection. Now generated once and stored in sessionStorage
+  // so it survives page refreshes within the same session.
+  const [requestId] = useState<string>(() => {
+    if (typeof window === "undefined") return `${user.id}_ssr`;
+    const storageKey = `checkout_rid_${user.id}`;
+    const stored = sessionStorage.getItem(storageKey);
+    if (stored) return stored;
+    const newId = `${user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    sessionStorage.setItem(storageKey, newId);
+    return newId;
+  });
+
+  // Tracks which orderId has already had ondismiss reported (prevents double-fire)
+  const failureReportedRef = useRef<Set<string>>(new Set());
 
   // Structured Address State
   const [addressLine1, setAddressLine1] = useState("");
@@ -43,6 +64,24 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
   // Hybrid Mode States
   const [isManualState, setIsManualState] = useState(false);
   const [isManualDistrict, setIsManualDistrict] = useState(false);
+
+  // Load Razorpay script ONCE on mount — prevents memory leak from re-appending on every retry
+  useEffect(() => {
+    if (typeof window === "undefined" || window.Razorpay) {
+      setRazorpayReady(true);
+      return;
+    }
+    if (document.querySelector('script[src*="razorpay"]')) {
+      setRazorpayReady(true);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.async = true;
+    script.onload = () => setRazorpayReady(true);
+    script.onerror = () => console.error("[RAZORPAY] Failed to load checkout script");
+    document.body.appendChild(script);
+  }, []);
 
   // Validation State
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -152,12 +191,14 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
       pincode: pincode.trim()
     };
 
-    // Generate idempotency key (request ID) for this checkout attempt
-    // This ensures that if the user retries, we don't create duplicate orders
-    const requestId = `${email}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
     try {
       setLoadingState("Creating Payment Gateway...");
+
+      if (!razorpayReady || !window.Razorpay) {
+        setLoadingState(null);
+        setError("Payment gateway is still loading. Please wait a moment and try again.");
+        return;
+      }
 
       // Step 1: Create pending order on backend (price calculated there)
       const orderResponse = await fetch("/api/razorpay/create-order", {
@@ -179,16 +220,8 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
 
       const { orderId, razorpayOrderId, amount, currency } = orderData;
 
-      // Step 2: Load Razorpay script
-      const script = document.createElement("script");
-      script.src = "https://checkout.razorpay.com/v1/checkout.js";
-      script.async = true;
-      script.onerror = () => {
-        setLoadingState(null);
-        setError("Failed to load payment gateway. Please refresh and try again.");
-      };
-
-      script.onload = () => {
+      // Step 2: Razorpay script already loaded at mount — open modal directly
+      (() => {
         const options = {
           key: process.env.NEXT_PUBLIC_RAZORPAY_KEY,
           amount,
@@ -215,6 +248,8 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
             const verifyData = await verifyResponse.json();
 
             if (verifyData.success) {
+              // Clear the session requestId so the next order gets a fresh one
+              sessionStorage.removeItem(`checkout_rid_${user.id}`);
               setLoadingState("Finalizing Order...");
               await new Promise((resolve) => setTimeout(resolve, 500));
               clearCart();
@@ -238,18 +273,18 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
               setLoadingState(null);
               setError("Payment cancelled. Your order has been saved — you can retry.");
 
-              // Persist failed state to DB so admin panel shows correct status
+              // Prevent double-fire (modal can occasionally trigger ondismiss multiple times)
+              if (failureReportedRef.current.has(orderId)) return;
+              failureReportedRef.current.add(orderId);
+
               try {
                 await fetch("/api/razorpay/payment-failed", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    orderId,
-                    reason: "Payment cancelled by user",
-                  }),
+                  body: JSON.stringify({ orderId, reason: "Payment cancelled by user" }),
                 });
               } catch {
-                // Non-critical — don't surface this error to the user
+                // Non-critical — don't surface to user
               }
             },
           },
@@ -258,9 +293,7 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
         const razorpay = new window.Razorpay(options);
         razorpay.open();
         setLoadingState(null);
-      };
-
-      document.body.appendChild(script);
+      })();
     } catch (error) {
       setLoadingState(null);
       const msg = error instanceof Error ? error.message : "An error occurred during checkout";
@@ -524,13 +557,14 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
 
                 {/* Support Info */}
                 <div className="mt-8 pt-8 border-t border-white/10">
-                  <h4 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Support & Enquiries</h4>
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-white/30 mb-4">Support &amp; Enquiries</h4>
                   <div className="flex flex-col gap-2 text-sm text-muted-foreground/80">
                     <p className="flex items-center gap-2">
-                       <span className="text-white/50">WhatsApp / Call:</span> +91 8883335553
+                       <span className="text-white/50">WhatsApp / Call:</span> {SUPPORT_PHONE}
                     </p>
                     <p className="flex items-center gap-2">
-                       <span className="text-white/50">Email:</span> makt.in.help@gmail.com
+                       <span className="text-white/50">Email:</span>
+                       <a href={`mailto:${SUPPORT_EMAIL}`} className="hover:text-white transition-colors">{SUPPORT_EMAIL}</a>
                     </p>
                   </div>
                 </div>
@@ -570,7 +604,7 @@ export default function ClientCheckout({ user }: { user: { id: string, name: str
                   cartItems.map(item => (
                     <div key={item.id} className="flex items-center gap-6">
                       <div className="w-16 h-16 bg-white/5 border border-white/5 rounded-xl overflow-hidden relative flex-shrink-0">
-                        <Image src={item.image} alt={item.name} fill className="object-contain p-1" />
+                        <Image src={item.image} alt={item.name} fill sizes="64px" className="object-contain p-1" />
                       </div>
                       <div className="flex-1">
                         <p className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">{item.category}</p>

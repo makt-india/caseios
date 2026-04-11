@@ -6,7 +6,7 @@ export type Product = {
   price: number;
   category: string;
   image: string;
-  description: string;
+  description?: string; // Optional — not selected in list queries, only in detail view
   createdAt: Date;
 };
 
@@ -19,18 +19,42 @@ export type OrderItem = {
   priceAtPurchase: number;
 };
 
+/**
+ * Order as returned by getOrders() (admin list view).
+ * Uses _count instead of full items array to avoid N+1 joins.
+ */
 export type Order = {
   id: string;
   customerName: string;
   customerEmail: string;
+  address: string;
   amount: number;
-  paymentStatus: string; // Allow string for Prisma compatibility
-  status: string; // Allow string
-  items: OrderItem[];
+  paymentMethod: string;
+  status: string;
+  paymentStatus: string;
+  razorpayOrderId: string;
+  razorpayPaymentId: string | null;
+  createdAt: Date;
+  _count: { items: number };
+};
+
+/**
+ * Order with full items — only fetched in detail/single-order view.
+ */
+export type OrderDetail = {
+  id: string;
+  customerName: string;
+  customerEmail: string;
+  address: string;
+  amount: number;
+  paymentMethod: string;
+  status: string;
+  paymentStatus: string;
+  razorpayOrderId: string;
+  razorpayPaymentId: string | null;
   createdAt: Date;
   updatedAt: Date;
-  address: string; // Required field
-  paymentMethod: string; // Required field
+  items: OrderItem[];
 };
 
 export type ContactMessage = {

@@ -1,24 +1,26 @@
 import { prisma } from "@/lib/db";
 import { NextRequest, NextResponse } from "next/server";
 import { rateLimit } from "@/lib/rateLimit";
+import { getCurrentUser } from "@/lib/auth";
 
 /**
- * PAYMENT FAILED / CANCELLED ENDPOINT
+ * PAYMENT CANCELLED / DISMISSED ENDPOINT
  *
- * Called when:
- * - User dismisses the Razorpay modal (ondismiss)
- * - Payment explicitly fails in Razorpay (payment.failed event)
+ * Called ONLY when the user dismisses the Razorpay modal (ondismiss).
+ * This is a CLIENT-SIDE signal — NOT authoritative.
  *
- * Before this endpoint existed, cancelled orders would stay as "pending" forever
- * in the admin panel — making it impossible to distinguish intent from failure.
+ * CRITICAL DESIGN DECISION:
+ *   We do NOT set paymentStatus = "failed" here.
+ *   Reason: the user may have completed payment before closing the modal
+ *   (race condition). The webhook is the authoritative source.
  *
- * This endpoint marks the order as failed with a reason so:
- * - Admin panel shows correct status (failed, not pending)
- * - Revenue calculation excludes it correctly
- * - Admin can decide to retry or reach out to the customer
+ *   We only log the cancellation intent and set a failureReason for UX.
+ *   The order stays "pending" so:
+ *     - The webhook can still mark it completed ✓
+ *     - The reconciliation cron can still recover it ✓
+ *     - The user can retry payment on the same orderId ✓
  */
 export async function POST(request: NextRequest) {
-  // VALIDATION: Ensure Content-Type is application/json
   const contentType = request.headers.get("content-type");
   if (!contentType?.includes("application/json")) {
     return NextResponse.json(
@@ -27,13 +29,17 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const user = await getCurrentUser();
+  if (!user) {
+    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+  }
+
   const clientIp =
     request.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
     request.headers.get("x-real-ip") ||
     "unknown";
 
-  // RATE LIMITING: 30 failure reports per 5 minutes per IP
-  const { allowed } = rateLimit(`payment-failed:${clientIp}`, 30, 5 * 60 * 1000);
+  const { allowed } = rateLimit(`payment-cancelled:${clientIp}`, 30, 5 * 60 * 1000);
   if (!allowed) {
     return NextResponse.json(
       { success: false, error: "Too many requests" },
@@ -46,76 +52,64 @@ export async function POST(request: NextRequest) {
     const { orderId, reason } = body;
 
     if (!orderId || typeof orderId !== "string" || !orderId.trim()) {
-      return NextResponse.json(
-        { success: false, error: "Order ID is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ success: false, error: "Order ID required" }, { status: 400 });
     }
 
-    // Lookup the order
     const order = await prisma.order.findUnique({
       where: { id: orderId },
-      select: { id: true, paymentStatus: true, status: true, razorpayOrderId: true },
+      select: { id: true, userId: true, paymentStatus: true, razorpayOrderId: true },
     });
 
     if (!order) {
-      return NextResponse.json(
-        { success: false, error: "Order not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ success: false, error: "Order not found" }, { status: 404 });
     }
 
-    // Only mark as failed if it's still in pending state
-    // Don't overwrite a successfully paid order with "failed"
-    if (order.paymentStatus !== "pending") {
-      return NextResponse.json({
-        success: true,
-        message: `Order already in state: ${order.paymentStatus}`,
-      });
+    if (order.userId !== user.id) {
+      console.warn(`[SECURITY] User ${user.id} attempted to cancel order ${orderId} (owner: ${order.userId})`);
+      return NextResponse.json({ success: false, error: "Forbidden" }, { status: 403 });
     }
 
-    const failureReason =
+    // If already completed by webhook (race condition) — return success quietly
+    if (order.paymentStatus === "completed") {
+      console.log(`[CANCEL RACE] Order ${orderId} already completed — cancellation ignored`);
+      return NextResponse.json({ success: true, message: "Order already completed" });
+    }
+
+    const cancelReason =
       typeof reason === "string" && reason.trim()
-        ? reason.trim().slice(0, 500)   // cap at 500 chars
-        : "Payment cancelled by user";
+        ? reason.trim().slice(0, 500)
+        : "Payment dismissed by user";
 
+    // KEEP paymentStatus = "pending" — do NOT set to "failed"
+    // Store reason in failureReason for UX display only
     await prisma.order.update({
       where: { id: orderId },
+      data: { failureReason: `[DISMISSED] ${cancelReason}` },
+    });
+
+    // Non-blocking audit log
+    prisma.paymentLog.create({
       data: {
-        paymentStatus: "failed",
-        failureReason,
+        orderId,
+        ipAddress: clientIp,
+        razorpayPaymentId: "dismissed",
+        razorpayOrderId: order.razorpayOrderId ?? "unknown",
+        signature: "none",
+        status: "failed",
+        errorMessage: cancelReason,
+        isRetry: false,
+        attemptCount: 1,
       },
-    });
+    }).catch((e: any) => console.error("[LOG] PaymentLog write failed:", e));
 
-    console.log(`[PAYMENT FAILED] Order ${orderId} marked as failed. Reason: ${failureReason}`);
+    console.log(
+      `[PAYMENT DISMISSED] Order ${orderId} dismissed by user ${user.id} — stays pending for webhook/cron recovery`
+    );
 
-    try {
-      await prisma.paymentLog.create({
-        data: {
-          orderId,
-          ipAddress: clientIp,
-          razorpayPaymentId: "cancelled_or_failed",
-          razorpayOrderId: order.razorpayOrderId || "unknown", // assuming order schema has razorpayOrderId or fallback to unknown
-          signature: "none",
-          status: "failed",
-          errorMessage: failureReason,
-          isRetry: false,
-          attemptCount: 1,
-        },
-      });
-    } catch (logError) {
-      console.error("[LOG ERROR] Could not save to paymentLog:", logError);
-    }
+    return NextResponse.json({ success: true, message: "Cancellation noted" });
 
-    return NextResponse.json({
-      success: true,
-      message: "Order marked as failed",
-    });
   } catch (error) {
     console.error("[UNHANDLED ERROR] payment-failed:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to update order status" },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: "Internal error" }, { status: 500 });
   }
 }

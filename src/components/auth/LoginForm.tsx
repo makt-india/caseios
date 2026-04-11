@@ -19,7 +19,7 @@ export function LoginForm({ csrfToken }: { csrfToken: string }) {
           </div>
         </div>
 
-        <h2 className="text-3xl font-medium tracking-tight mb-2 text-center text-white">CASIOS Authentication</h2>
+        <h2 className="text-3xl font-medium tracking-tight mb-2 text-center text-white">CASEIOS Authentication</h2>
         <p className="text-muted-foreground text-center mb-8 text-sm">Secure user and admin gateway.</p>
 
         <form action={formAction} className="space-y-6">

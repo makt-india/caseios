@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+// Product detail page is always dynamic — uses route params which are request-time.
 import { getProductById } from "@/app/actions";
 import ClientProduct from "./ClientProduct";
 

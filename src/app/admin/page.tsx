@@ -1,4 +1,5 @@
-export const dynamic = "force-dynamic";
+// Admin page is always dynamic — uses cookies() via requireAdmin(), which
+// opts it out of static rendering automatically in Next.js 16.
 
 import { 
   getProducts, addProduct, deleteProduct, adminLogout, getOrders, 
@@ -34,11 +35,13 @@ export default async function AdminDashboard({ searchParams }: { searchParams: P
   const searchFilter = params?.search || "";
   const statusFilter = params?.status as any;
 
+  // Conditional fetching: only fetch data needed for the active view
+  // This prevents loading 200+ orders with joins when the admin is on Inventory view
   const [products, orders, feedback, completedRevenue, adminLogs, adminSessions, currentUser] = await Promise.all([
-    getProducts(),
-    getOrders({ search: searchFilter, status: statusFilter }),
-    getContactLeads(),
-    getCompletedRevenue(),
+    view === "inventory" ? getProducts() : Promise.resolve([]),
+    view === "orders" ? getOrders({ search: searchFilter, status: statusFilter }) : Promise.resolve([]),
+    view === "feedback" ? getContactLeads() : Promise.resolve([]),
+    getCompletedRevenue(), // Always needed for metrics
     view === "security" ? getAdminLogs() : Promise.resolve([]),
     view === "security" ? getAdminSessions() : Promise.resolve([]),
     getCurrentUser(),
@@ -57,7 +60,7 @@ export default async function AdminDashboard({ searchParams }: { searchParams: P
               <LayoutDashboard className="w-5 h-5 mr-3 text-white/50" />
               Command Center
             </h1>
-            <p className="text-muted-foreground mt-2 text-xs">CASIOS Corporate Admin</p>
+            <p className="text-muted-foreground mt-2 text-xs">CASEIOS Corporate Admin</p>
           </div>
 
           <nav className="flex-1 space-y-2">
@@ -91,11 +94,11 @@ export default async function AdminDashboard({ searchParams }: { searchParams: P
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="glass p-6 rounded-3xl border border-white/5 flex flex-col justify-center">
             <p className="text-muted-foreground text-sm font-medium mb-1 flex items-center"><Box className="w-4 h-4 mr-2" /> Active Products</p>
-            <p className="text-3xl font-bold text-white">{products.length}</p>
+            <p className="text-3xl font-bold text-white">{view === "inventory" ? products.length : "—"}</p>
           </div>
           <div className="glass p-6 rounded-3xl border border-white/5 flex flex-col justify-center">
             <p className="text-muted-foreground text-sm font-medium mb-1 flex items-center"><Users className="w-4 h-4 mr-2" /> Total Orders</p>
-            <p className="text-3xl font-bold text-white">{orders.length}</p>
+            <p className="text-3xl font-bold text-white">{view === "orders" ? orders.length : "—"}</p>
           </div>
           <div className="glass p-6 rounded-3xl border border-white/5 flex flex-col justify-center relative overflow-hidden">
              <div className="absolute top-1/2 right-[-10%] w-24 h-24 bg-emerald-500/20 rounded-full blur-[30px]" />
@@ -144,7 +147,7 @@ export default async function AdminDashboard({ searchParams }: { searchParams: P
                       {products.map((p: Product) => (
                         <div key={p.id} className="flex gap-4 items-center p-3 bg-zinc-950/50 border border-white/5 rounded-2xl hover:bg-white/[0.02]">
                           <div className="w-16 h-16 bg-white/5 rounded-xl aspect-square relative flex-shrink-0">
-                            <Image src={p.image || "/images/hero.png"} alt={p.name} fill className="object-contain p-2" />
+                            <Image src={p.image || "/images/hero.png"} alt={p.name} fill sizes="100px" className="object-contain p-2" />
                           </div>
                           <div className="flex-1 w-full min-w-0">
                             <h3 className="font-semibold text-white whitespace-nowrap overflow-hidden text-ellipsis">{p.name}</h3>

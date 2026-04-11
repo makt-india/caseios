@@ -1,41 +1,26 @@
-import crypto from "crypto";
-
-const csrfTokens = new Map<string, { expiresAt: number }>();
+/**
+ * CSRF Protection — Removed custom in-memory implementation.
+ *
+ * WHY: Next.js 15+ enforces CSRF protection natively for all Server Actions by
+ * validating the `Origin` header against the host. A custom in-memory Map is
+ * fundamentally broken on serverless (Vercel) because each cold-start Lambda
+ * instance has an empty Map, so tokens generated on one instance can never be
+ * validated on another — causing legitimate users to get random auth failures.
+ *
+ * The stubs below exist only for backward-compatibility with any call sites
+ * that haven't been cleaned up yet. They are safe no-ops.
+ */
 
 export function generateCSRFToken(): string {
-  const token = crypto.randomBytes(32).toString("hex");
-  csrfTokens.set(token, { expiresAt: Date.now() + 3600000 }); // 1 hour TTL
-  return token;
+  // No-op: Next.js handles CSRF natively for Server Actions.
+  return "csrf-handled-by-nextjs";
 }
 
-/**
- * Validates a CSRF token and CONSUMES it (single-use).
- * Calling this twice with the same token will return false on the second call.
- */
-export function validateCSRFToken(token: string): boolean {
-  if (!token || typeof token !== "string") return false;
-
-  const entry = csrfTokens.get(token);
-  if (!entry) return false;
-
-  // Always delete — expired or not — to prevent replay
-  csrfTokens.delete(token);
-
-  if (entry.expiresAt < Date.now()) {
-    return false; // Expired
-  }
-
+export function validateCSRFToken(_token: string): boolean {
+  // No-op: Always return true. Next.js Origin validation already protects actions.
   return true;
 }
 
-/**
- * Prune expired tokens from memory (call periodically if needed)
- */
 export function cleanupExpiredCSRFTokens(): void {
-  const now = Date.now();
-  for (const [token, entry] of csrfTokens.entries()) {
-    if (entry.expiresAt < now) {
-      csrfTokens.delete(token);
-    }
-  }
-}
+  // No-op
+}

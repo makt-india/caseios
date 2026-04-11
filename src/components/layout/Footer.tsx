@@ -1,5 +1,9 @@
 import Link from "next/link";
+import Image from "next/image";
 import { ArrowRight } from "lucide-react";
+
+const SUPPORT_EMAIL = process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "makt.in.help@gmail.com";
+const SUPPORT_PHONE = process.env.NEXT_PUBLIC_SUPPORT_PHONE ?? "+91 8883335553";
 
 export function Footer() {
   return (
@@ -11,8 +15,18 @@ export function Footer() {
         
         {/* Brand & Newsletter */}
         <div className="col-span-1 md:col-span-5">
-          <Link href="/" className="font-extrabold tracking-[0.2em] text-2xl text-white mb-6 block">
-            CASIOS
+          <Link href="/" className="mb-6 inline-flex items-center gap-4">
+            <Image 
+              src="/images/logo1.png" 
+              alt="CASEIOS Logo" 
+              width={80} 
+              height={80} 
+              style={{ width: 'auto', height: '80px' }}
+              className="object-contain" 
+            />
+            <span className="font-extrabold tracking-[0.2em] text-2xl text-white mt-1">
+              CASEIOS
+            </span>
           </Link>
           <p className="max-w-sm text-sm text-muted-foreground/80 leading-relaxed mb-8">
             The intersection of pure performance and relentless design. We engineer the artifacts of tomorrow, today.
@@ -50,8 +64,12 @@ export function Footer() {
           <div>
             <h4 className="text-white font-medium mb-6 text-xs tracking-[0.2em] uppercase">Support</h4>
             <ul className="space-y-4 text-sm text-muted-foreground/80">
-              <li className="text-white/50">+91 8883335553</li>
-              <li className="text-white/50">makt.in.help@gmail.com</li>
+              <li className="text-white/50">{SUPPORT_PHONE}</li>
+              <li>
+                <a href={`mailto:${SUPPORT_EMAIL}`} className="hover:text-white transition-colors">
+                  {SUPPORT_EMAIL}
+                </a>
+              </li>
               <li><Link href="/contact" className="hover:text-white transition-colors">Contact Us</Link></li>
               <li><Link href="#" className="hover:text-white transition-colors">Shipping Returns</Link></li>
               <li><Link href="#" className="hover:text-white transition-colors">FAQ</Link></li>
@@ -62,7 +80,7 @@ export function Footer() {
 
       {/* Bottom Bar */}
       <div className="max-w-7xl mx-auto px-6 mt-24 pt-8 border-t border-white/5 flex flex-col md:flex-row items-center justify-between text-xs relative z-10 text-muted-foreground/60">
-        <p>&copy; {new Date().getFullYear()} CASIOS Corporation. All rights reserved.</p>
+        <p>&copy; 2025 CASEIOS Corporation. All rights reserved.</p>
         <div className="flex items-center gap-6 mt-6 md:mt-0">
           <Link href="#" className="hover:text-white transition-colors">Privacy Policy</Link>
           <Link href="#" className="hover:text-white transition-colors">Terms of Service</Link>

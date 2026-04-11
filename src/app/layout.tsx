@@ -14,8 +14,13 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "CASIOS | Premium Commerce",
+  title: "CASEIOS | Premium Commerce",
   description: "Next generation digital checkout & shopping experience.",
+  openGraph: {
+    title: "CASEIOS | Premium Commerce",
+    description: "Next generation digital checkout & shopping experience.",
+    type: "website",
+  },
 };
 
 export default async function RootLayout({
@@ -23,6 +28,8 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // React cache() in getCurrentUser() deduplicates this across all
+  // server components in the same request (admin page, checkout, etc.)
   const user = await getCurrentUser();
 
   return (

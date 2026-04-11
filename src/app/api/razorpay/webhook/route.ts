@@ -4,12 +4,18 @@ import { prisma } from "@/lib/db";
 import { sendPaymentSuccessEmail, sendPaymentFailureEmail } from "@/lib/email";
 
 /**
- * PRODUCTION RAZORPAY WEBHOOK
+ * RAZORPAY WEBHOOK — PRODUCTION SAFE
  *
- * Security & Reliability:
- * - Verifies Razorpay Webhook Signatures using crypto.timingSafeEqual
- * - Idempotent processing of webhook events (checks status before applying)
- * - Safe error ignoring for non-fatal errors to prevent webhook retries
+ * Fixes implemented:
+ * - C5/H3: Cross-checks razorpayOrderId from event against DB (prevents tampered webhook from
+ *   marking the wrong order as paid)
+ * - Atomic updateMany with conditional WHERE (same race-condition guard as verify-payment)
+ * - Returns 400 (not 500) on invalid signatures so Razorpay does not retry indefinitely
+ * - All length checks before timingSafeEqual (prevents TypeError panic)
+ * - Idempotent: checks current paymentStatus before any mutation
+ *
+ * CRITICAL: This webhook is the source of truth when client-side verification fails.
+ * It MUST complete successfully for real money to be properly recorded.
  */
 
 export async function POST(request: NextRequest) {
@@ -18,153 +24,210 @@ export async function POST(request: NextRequest) {
     const signature = request.headers.get("x-razorpay-signature");
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
+    // ── Webhook secret must be configured ─────────────────────────────
     if (!webhookSecret) {
-      console.error("[WEBHOOK CONFIG ERROR] RAZORPAY_WEBHOOK_SECRET is not set.");
-      // Return 500 so Razorpay retries if the secret is temporarily missing
-      return NextResponse.json({ error: "Configuration Error" }, { status: 500 });
+      console.error("[WEBHOOK CONFIG] RAZORPAY_WEBHOOK_SECRET not set — retrying will keep failing");
+      return NextResponse.json({ error: "Configuration error" }, { status: 500 });
     }
 
+    // ── Signature header must be present ──────────────────────────────
     if (!signature) {
+      console.warn("[WEBHOOK] Request with missing x-razorpay-signature header");
       return NextResponse.json({ error: "Missing signature" }, { status: 400 });
     }
 
-    // Verify Signature Securely
-    const expectedSignature = crypto
+    // ── Compute expected HMAC ──────────────────────────────────────────
+    const expectedHex = crypto
       .createHmac("sha256", webhookSecret)
       .update(rawBody)
       .digest("hex");
 
-    const isSignatureValid = crypto.timingSafeEqual(
-      Buffer.from(expectedSignature),
-      Buffer.from(signature)
-    );
+    const expectedBuf = Buffer.from(expectedHex, "hex");
 
-    if (!isSignatureValid) {
-      console.error("[WEBHOOK SECURITY WARNING] Invalid Razorpay Signature from IP:", request.headers.get("x-forwarded-for"));
+    let receivedBuf: Buffer;
+    try {
+      receivedBuf = Buffer.from(signature, "hex");
+    } catch {
+      console.error("[WEBHOOK SECURITY] Non-hex signature header:", signature?.slice(0, 20));
+      return NextResponse.json({ error: "Invalid signature format" }, { status: 400 });
+    }
+
+    // Length check BEFORE timingSafeEqual to prevent TypeError panic → 500 → infinite Razorpay retry
+    if (expectedBuf.length !== receivedBuf.length) {
+      console.error(`[WEBHOOK SECURITY] Signature length mismatch: expected ${expectedBuf.length}B, got ${receivedBuf.length}B`);
       return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
     }
 
-    const event = JSON.parse(rawBody);
+    if (!crypto.timingSafeEqual(expectedBuf, receivedBuf)) {
+      console.error("[WEBHOOK SECURITY] Invalid signature — possible replay or spoofing attempt from IP:", request.headers.get("x-forwarded-for"));
+      return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+    }
 
-    const eventName = event.event;
-    const paymentEntity = event.payload.payment?.entity;
-    
+    // ── Parse event ────────────────────────────────────────────────────
+    let event: any;
+    try {
+      event = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json({ error: "Malformed JSON body" }, { status: 400 });
+    }
+
+    const eventName: string = event.event;
+    const paymentEntity = event.payload?.payment?.entity;
+
     if (!paymentEntity) {
-      return NextResponse.json({ error: "Malformed Payload" }, { status: 400 });
+      // Some webhook events (like order.paid) have different payload shape
+      console.log(`[WEBHOOK] Ignoring event without payment entity: ${eventName}`);
+      return NextResponse.json({ success: true, message: "Event ignored" });
     }
 
-    // `receipt` holds our internal Order ID (set in create-order)
-    const orderId = paymentEntity.notes?.orderId || paymentEntity.receipt;
-    const razorpayPaymentId = paymentEntity.id;
-    const razorpayOrderId = paymentEntity.order_id;
-    const amount = paymentEntity.amount / 100; // converted from paise
+    // Extract IDs from the webhook payload
+    const razorpayPaymentId: string = paymentEntity.id;
+    const razorpayOrderId: string = paymentEntity.order_id;
+    // Our internal orderId is stored in the Razorpay order notes (patched after DB creation)
+    const orderId: string | undefined = paymentEntity.notes?.orderId || paymentEntity.receipt?.replace("rcpt_", "");
 
-    if (!orderId) {
-      console.error(`[WEBHOOK] Event ${eventName} has no orderId mapped. PaymentID: ${razorpayPaymentId}`);
-      return NextResponse.json({ success: true, message: "Unrelated event ignored" });
+    if (!orderId || !razorpayOrderId || !razorpayPaymentId) {
+      console.error(`[WEBHOOK] Missing IDs in event ${eventName}:`, { orderId, razorpayOrderId, razorpayPaymentId });
+      return NextResponse.json({ success: true, message: "Event missing required IDs — ignored" });
     }
 
+    // ── Fetch order from DB by our internal ID ─────────────────────────
     const order = await prisma.order.findUnique({
-      where: { id: orderId }
+      where: { id: orderId },
+      select: {
+        id: true,
+        razorpayOrderId: true,
+        paymentStatus: true,
+        amount: true,
+        customerEmail: true,
+        customerName: true,
+        paymentMethod: true,
+      },
     });
 
     if (!order) {
-      console.error(`[WEBHOOK] Order ${orderId} not found for event: ${eventName}`);
+      // Could be a test event or a mismatched receipt — don't return 4xx (causes Razorpay retry)
+      console.warn(`[WEBHOOK] Order ${orderId} not found in DB for event ${eventName}`);
       return NextResponse.json({ success: true, message: "Order not found" });
     }
 
-    // Handle the specific events
+    // ── FIX C5/H3: Cross-check razorpayOrderId ────────────────────────
+    // Prevents a tampered webhook from marking one order paid using another order's payment.
+    if (order.razorpayOrderId !== razorpayOrderId) {
+      console.error(
+        `[WEBHOOK SECURITY] razorpayOrderId mismatch for order ${orderId}: DB has ${order.razorpayOrderId}, webhook sent ${razorpayOrderId}`
+      );
+      // Return 400 so Razorpay does NOT retry (this is a data integrity issue, not a transient error)
+      return NextResponse.json({ error: "Order ID mismatch" }, { status: 400 });
+    }
+
+    // ── Handle event types ─────────────────────────────────────────────
     if (eventName === "payment.captured" || eventName === "payment.authorized") {
-      // Idempotency check: don't process if already paid
-      if (order.paymentStatus === "completed") {
-        return NextResponse.json({ success: true, message: "Order already completed" });
+      const amountPaise = Number(paymentEntity.amount);
+      const dbAmountPaise = Math.round(order.amount * 100);
+
+      // Amount reconciliation — flag discrepancy but don't block (amount mismatch on capture
+      // is Razorpay's side; we still mark the order paid but log it for manual review)
+      if (amountPaise !== dbAmountPaise) {
+        console.error(
+          `[WEBHOOK AMOUNT MISMATCH] Order ${orderId}: Razorpay captured ₹${amountPaise / 100}, DB expects ₹${order.amount}. REVIEW REQUIRED.`,
+          { razorpayPaymentId, razorpayOrderId }
+        );
       }
 
-      await prisma.order.update({
-        where: { id: orderId },
+      // Idempotency — already completed
+      if (order.paymentStatus === "completed") {
+        console.log(`[WEBHOOK IDEMPOTENT] Order ${orderId} already completed`);
+        return NextResponse.json({ success: true, message: "Already completed" });
+      }
+
+      // FIX C3 applied here too: updateMany with WHERE paymentStatus=pending so only one wins
+      const result = await prisma.order.updateMany({
+        where: { id: orderId, paymentStatus: "pending" },
         data: {
           paymentStatus: "completed",
           status: "paid",
-          razorpayPaymentId
-        }
-      });
-
-      // Log success webhook event
-      await prisma.paymentLog.create({
-        data: {
-          orderId,
-          ipAddress: "webhook",
           razorpayPaymentId,
-          razorpayOrderId,
-          signature: "webhook_signature",
-          status: "verified",
-          errorMessage: `Webhook ${eventName} received`,
-          isRetry: false,
-          attemptCount: 1,
-        }
+        },
       });
 
-      // Async email notification
-      sendPaymentSuccessEmail(
-        order.customerEmail,
-        order.customerName,
-        order.id,
-        order.amount,
-        order.paymentMethod
-      ).catch((e: any) => console.error("[EMAIL] Fail:", e));
+      if (result.count > 0) {
+        await prisma.paymentLog.create({
+          data: {
+            orderId,
+            ipAddress: "webhook",
+            razorpayPaymentId,
+            razorpayOrderId,
+            signature: "webhook_verified",
+            status: "verified",
+            errorMessage: `Webhook: ${eventName}`,
+            isRetry: false,
+            attemptCount: 1,
+          },
+        }).catch((e: any) => console.error("[LOG] PaymentLog write failed:", e));
 
-      console.log(`[WEBHOOK SUCCESS] Order ${orderId} marked as completed.`);
+        sendPaymentSuccessEmail(
+          order.customerEmail,
+          order.customerName,
+          order.id,
+          order.amount,
+          order.paymentMethod
+        ).catch((e: any) => console.error("[EMAIL] Fail:", e));
+
+        console.log(`[WEBHOOK SUCCESS] Order ${orderId} marked paid via ${eventName}`);
+      } else {
+        console.log(`[WEBHOOK RACE] Order ${orderId} was already updated by a concurrent request`);
+      }
+
       return NextResponse.json({ success: true });
 
     } else if (eventName === "payment.failed") {
-      // Ignore if order already handled successfully or failed
-      if (order.paymentStatus !== "pending") {
-         return NextResponse.json({ success: true, message: "Order already resolved" });
+      const failureReason =
+        paymentEntity.error_description ||
+        paymentEntity.error_reason ||
+        "Webhook: payment.failed";
+
+      // Only update if still pending — never overwrite a completed order
+      const result = await prisma.order.updateMany({
+        where: { id: orderId, paymentStatus: "pending" },
+        data: { paymentStatus: "failed", failureReason },
+      });
+
+      if (result.count > 0) {
+        await prisma.paymentLog.create({
+          data: {
+            orderId,
+            ipAddress: "webhook",
+            razorpayPaymentId,
+            razorpayOrderId: razorpayOrderId || "unknown",
+            signature: "webhook_verified",
+            status: "failed",
+            errorMessage: failureReason,
+            isRetry: false,
+            attemptCount: 1,
+          },
+        }).catch((e: any) => console.error("[LOG] PaymentLog write failed:", e));
+
+        sendPaymentFailureEmail(
+          order.customerEmail,
+          order.customerName,
+          order.id,
+          order.amount,
+          failureReason
+        ).catch((e: any) => console.error("[EMAIL] Fail:", e));
+
+        console.log(`[WEBHOOK FAILED] Order ${orderId} marked failed: ${failureReason}`);
       }
 
-      const failureReason = paymentEntity.error_description || "Webhook reported payment failure";
-
-      await prisma.order.update({
-        where: { id: orderId },
-        data: {
-          paymentStatus: "failed",
-          failureReason
-        }
-      });
-
-      // Log failure webhook event
-      await prisma.paymentLog.create({
-        data: {
-          orderId,
-          ipAddress: "webhook",
-          razorpayPaymentId,
-          razorpayOrderId: razorpayOrderId || "unknown",
-          signature: "webhook_signature",
-          status: "failed",
-          errorMessage: failureReason,
-          isRetry: false,
-          attemptCount: 1,
-        }
-      });
-
-      sendPaymentFailureEmail(
-        order.customerEmail,
-        order.customerName,
-        order.id,
-        order.amount,
-        failureReason
-      ).catch((e: any) => console.error("[EMAIL] Fail:", e));
-
-      console.log(`[WEBHOOK FAILED] Order ${orderId} marked as failed. Reason: ${failureReason}`);
       return NextResponse.json({ success: true });
     }
 
-    // Default return for standard webhook ping/unhandled events
-    return NextResponse.json({ success: true, message: "Event ignored" });
+    // Unhandled event type (e.g., refund.created, order.paid) — log and acknowledge
+    console.log(`[WEBHOOK] Unhandled event type: ${eventName}`);
+    return NextResponse.json({ success: true, message: `${eventName} acknowledged` });
 
   } catch (error) {
     console.error("[WEBHOOK EXCEPTION]", error);
-    // Don't fail the webhook unless it's a real server error to prevent retries of bad data
-    return NextResponse.json({ error: "Internal Error" }, { status: 500 });
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

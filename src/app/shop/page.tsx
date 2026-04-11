@@ -1,4 +1,5 @@
-export const dynamic = "force-dynamic";
+// Products are served from cache (via use cache in getProducts)
+// and revalidated via cacheTag when admin mutates the product list.
 
 import ClientHome from "@/app/ClientHome";
 import { getProducts } from "@/app/actions";

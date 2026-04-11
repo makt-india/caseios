@@ -57,7 +57,7 @@ export function CartDrawer() {
                 cartItems.map((item) => (
                   <div key={item.id} className="flex gap-4">
                     <div className="w-24 h-24 bg-white/5 rounded-xl border border-white/10 relative flex-shrink-0 overflow-hidden flex items-center justify-center p-2">
-                      <Image src={item.image || "/images/hero.png"} alt={item.name} fill className="object-contain" />
+                      <Image src={item.image || "/images/hero.png"} alt={item.name} fill sizes="96px" className="object-contain" />
                     </div>
                     <div className="flex-1 flex flex-col justify-between py-1">
                       <div>

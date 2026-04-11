@@ -45,6 +45,7 @@ model Order {
   @@index([createdAt])
   @@index([paymentStatus])
   @@index([razorpayOrderId])
+  @@index([razorpayPaymentId]) // H4: needed for idempotency lookup in verify-payment
 }
 
 model OrderItem {
