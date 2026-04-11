@@ -66,7 +66,7 @@ export default function ClientHome({ products }: { products: Product[] }) {
                   <Button size="lg" className="w-full sm:w-auto px-10 rounded-full bg-white text-black hover:bg-neutral-200 transition-all duration-300 tracking-[0.15em] uppercase text-xs font-bold shadow-[0_0_20px_rgba(255,255,255,0.3)]">
                     Shop Collection
                   </Button>
-                  <Button size="lg" variant="outline" className="w-full sm:w-auto px-10 rounded-full border border-white/20 bg-black/20 text-white hover:bg-white/10 hover:text-white backdrop-blur-md tracking-[0.15em] uppercase text-xs font-bold">
+                  <Button size="lg" variant="secondary" className="w-full sm:w-auto px-10 rounded-full border border-white/20 bg-black/20 text-white hover:bg-white/10 hover:text-white backdrop-blur-md tracking-[0.15em] uppercase text-xs font-bold">
                     Tech Specs
                   </Button>
                 </div>
